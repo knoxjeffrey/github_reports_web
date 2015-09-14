@@ -22,6 +22,9 @@ module GitHubAPI
   User = Struct.new(:name, :location, :public_repos)
   Event = Struct.new(:type, :repo_name)
   Repo = Struct.new(:name, :languages)
+  Gist = Struct.new(:id, :url, :description, :files, :public, :created_at)
+  GistFile = Struct.new(:name, :language, :content)
+  Page = Struct.new(:items, :page, :total_pages)
 
   class Client
 
@@ -118,6 +121,53 @@ module GitHubAPI
       end
     end
 
+    def gists(page:1)
+      page = page.present? ? page.to_i : 1
+      url = "https://api.github.com/gists?page=#{page}"
+
+      response = connection.get(url)
+      last_page_url = header_link(response.headers, "last")
+
+      if last_page_url
+        uri = URI.parse(last_page_url)
+        total_pages = Rack::Utils.parse_query(uri.query)["page"].to_i
+      else
+        total_pages = page
+      end
+
+      items = response.body.map do |gist_data|
+        Gist.new(gist_data["id"], gist_data["html_url"], gist_data["description"], [], gist_data["public"], gist_data["created_at"])
+      end
+
+      Page.new(items, page, total_pages)
+    end
+
+    def gist_info(gist_id)
+      url = "https://api.github.com/gists/#{gist_id}"
+
+      response = connection.get(url)
+
+      if response.status == 200
+        gist = response.body
+        files = gist["files"].map do |(name, file)|
+          GistFile.new(name, file["language"], file["content"])
+        end
+        Gist.new(gist["id"], gist["html_url"], gist["description"], files, gist["public"], gist["created_at"])
+      else
+        raise NonexistentGist, "No gist found with id #{gist_id}."
+      end
+    end
+
+    def delete_gist(gist_id)
+      url = "https://api.github.com/gists/#{gist_id}"
+
+      response = connection.delete(url)
+
+      if response.status != 204
+        raise NonexistentGist, "No gist found with id #{gist_id}."
+      end
+    end
+
     def repo_starred?(full_repo_name)
       url = "https://api.github.com/user/starred/#{full_repo_name}"
       response = connection.get url
@@ -141,10 +191,27 @@ module GitHubAPI
         builder.use Middleware::StatusCheck
         builder.use Middleware::Authentication, @token
         builder.use Middleware::JSONParsing
-        builder.use Middleware::Logging
-        builder.use Middleware::Cache, Storage::Redis.new
+        builder.use Middleware::Logging, Rails.logger
+        builder.use Middleware::Cache, Rails.cache #Storage::Redis.new
+        builder.use Middleware::Notification
+
         builder.adapter Faraday.default_adapter
       end
     end
+
+    private
+
+    def header_link(response_headers, link_type)
+      header_to_match = /<(.*)>\; rel="#{link_type}"/
+
+      if response_headers['link']
+        headers = response_headers['link'].split(",")
+        headers.each do |header|
+          return header.match(header_to_match)[1] if header.match(header_to_match)
+        end
+        nil
+      end
+    end
+
   end
 end

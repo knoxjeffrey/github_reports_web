@@ -8,6 +8,7 @@ module GitHubAPI
 
       def call(env)
         key = env.url.to_s
+
         cached_response = Response.new(@storage.read(key))
 
         if cached_response.exist?
